@@ -1,15 +1,38 @@
-"""小票与支付截图识别接口。"""
+"""小票与支付截图上传接口。
+
+POST /receipts/parse 目前只做文件校验并生成空草稿，视觉识别尚未接入；
+返回的 amount_cents、merchant、occurred_at、category 都是 None，
+前端根据 missing_fields 提示用户补全。
+"""
 
 from fastapi import APIRouter, File, UploadFile, status
 
 from app import store
-from app.core.errors import ApiError
+from app.core.errors import (
+    VALIDATION_ERROR_RESPONSES,
+    ApiError,
+    ErrorResponse,
+)
+from app.db import SessionDep
 from app.schemas.transaction import Source, TransactionDraft
 
-router = APIRouter(prefix="/receipts", tags=["小票识别"])
+router = APIRouter(
+    prefix="/receipts",
+    tags=["小票识别"],
+    # 400/413/415 分别对应 parse_receipt() 里的三个校验分支：
+    # 空文件、超过 32MB、MIME 不在 _ALLOWED_TYPES；422 复用统一校验错误结构。
+    responses={
+        **VALIDATION_ERROR_RESPONSES,
+        400: {"model": ErrorResponse, "description": "文件为空"},
+        413: {"model": ErrorResponse, "description": "图片超过 32MB"},
+        415: {"model": ErrorResponse, "description": "不支持的图片格式"},
+    },
+)
 
-# 允许的图片 MIME 类型；模型侧按文件内容判断实际格式。
+# 允许的图片 MIME 类型。这里只校验客户端声明的 content_type，
+# 实际文件内容需要后续图像库或视觉模型进一步判断。
 _ALLOWED_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+# 单张图片上限 32MB；parse_receipt() 会多读 1 字节判断是否超限。
 _MAX_BYTES = 32 * 1024 * 1024
 
 
@@ -30,7 +53,7 @@ _MAX_BYTES = 32 * 1024 * 1024
                         "source": "receipt",
                         "amount_cents": 3250,
                         "merchant": "老乡鸡",
-                        "occurred_at": "2026-11-11T12:30:00+08:00",
+                        "occurred_at": "2026-11-11T04:30:00Z",
                         "category": "餐饮",
                         "confidence": 0.92,
                         "missing_fields": [],
@@ -41,27 +64,50 @@ _MAX_BYTES = 32 * 1024 * 1024
         }
     },
 )
-async def parse_receipt(file: UploadFile = File(..., description="小票或支付截图")) -> TransactionDraft:
-    """校验上传文件并生成解析草稿。"""
+def parse_receipt(
+    session: SessionDep,
+    file: UploadFile = File(..., description="小票或支付截图"),
+) -> TransactionDraft:
+    """校验上传文件，并写入 source=receipt 的空草稿。
+
+    参数:
+        session: 请求级会话，交给 store.save_draft() 写入 transaction_drafts。
+        file: multipart 字段名为 file；content_type 和文件大小在这里校验。
+
+    返回:
+        TransactionDraft：amount_cents / merchant / occurred_at / category 全部为 None，
+        missing_fields 固定列出这四个字段，raw_text 为 None。
+
+    错误:
+        ApiError 由 core/errors.py 的异常处理器转成 ErrorResponse：
+        - 415 UNSUPPORTED_IMAGE_TYPE：content_type 不在 _ALLOWED_TYPES；
+        - 413 IMAGE_TOO_LARGE：读出的字节数超过 _MAX_BYTES；
+        - 400 EMPTY_FILE：读出的字节数为 0。
+    """
     if file.content_type not in _ALLOWED_TYPES:
+        # 先校验 MIME，避免把非图片内容读进来；content_type 由客户端提供，不能完全信任。
         raise ApiError(
             code="UNSUPPORTED_IMAGE_TYPE",
             message=f"不支持的图片格式：{file.content_type}，请使用 JPEG / PNG / GIF / WebP",
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
-    content = await file.read()
+    # UploadFile.file 是底层临时文件；最多读 _MAX_BYTES + 1 字节，
+    # 多出的 1 字节只用于判断是否超限，避免把超大文件整个读进内存。
+    content = file.file.read(_MAX_BYTES + 1)
     if len(content) > _MAX_BYTES:
         raise ApiError(
             code="IMAGE_TOO_LARGE",
             message="图片超过 32MB",
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail={"size_bytes": len(content), "limit_bytes": _MAX_BYTES},
+            detail={"limit_bytes": _MAX_BYTES},
         )
     if not content:
         raise ApiError(code="EMPTY_FILE", message="文件为空")
 
+    # 视觉识别尚未接入：这里只生成空草稿，字段全为 None，由前端提示用户补全。
     draft = TransactionDraft(
+        # draft_id 由 store.new_draft_id() 生成，后续保存账目时回传。
         draft_id=store.new_draft_id(),
         source=Source.RECEIPT,
         amount_cents=None,
@@ -69,6 +115,8 @@ async def parse_receipt(file: UploadFile = File(..., description="小票或支�
         occurred_at=None,
         category=None,
         confidence=0.0,
+        # 与草稿字段顺序一致，前端按这个数组标记待补项。
         missing_fields=["amount_cents", "merchant", "occurred_at", "category"],
     )
-    return store.save_draft(draft)
+    # save_draft() 写入 transaction_drafts 并 commit，返回值直接作为响应。
+    return store.save_draft(session, draft)

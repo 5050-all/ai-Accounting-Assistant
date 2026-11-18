@@ -1,16 +1,29 @@
-"""统计接口。"""
+"""分类统计接口。
 
-from collections import defaultdict
-from datetime import datetime
+GET /stats/category 把 from/to 交给 store.category_totals()，
+由 SQL 按 category 分组聚合 transactions，再组装成 CategoryStatsResponse。
+"""
+
+from typing import Annotated
 
 from fastapi import APIRouter, Query
 
 from app import store
+from app.core.errors import VALIDATION_ERROR_RESPONSES
+from app.db import SessionDep
+from app.schemas.common import DateRangeQuery
 from app.schemas.stats import CategoryStat, CategoryStatsResponse
 
-router = APIRouter(prefix="/stats", tags=["统计"])
+router = APIRouter(
+    prefix="/stats",
+    tags=["统计"],
+    # 422 使用统一 ErrorResponse，见 app/core/errors.py。
+    responses=VALIDATION_ERROR_RESPONSES,
+)
 
 
+# 200 示例只用于 OpenAPI 文档展示；真实的 items、金额和 ratio
+# 由 store.category_totals() 的聚合结果和下方计算逻辑决定。
 @router.get(
     "/category",
     response_model=CategoryStatsResponse,
@@ -24,13 +37,13 @@ router = APIRouter(prefix="/stats", tags=["统计"])
             "content": {
                 "application/json": {
                     "example": {
-                        "date_from": "2026-11-01T00:00:00+08:00",
-                        "date_to": "2026-11-30T23:59:59+08:00",
+                        "date_from": "2026-11-01T00:00:00Z",
+                        "date_to": "2026-11-30T23:59:59Z",
                         "total_cents": 185000,
                         "items": [
                             {"category": "餐饮", "total_cents": 96000, "count": 23, "ratio": 0.519},
-                            {"category": "交通", "total_cents": 42000, "count": 11, "ratio": 0.227},
                             {"category": "购物", "total_cents": 47000, "count": 5, "ratio": 0.254},
+                            {"category": "交通", "total_cents": 42000, "count": 11, "ratio": 0.227},
                         ],
                     }
                 }
@@ -39,36 +52,44 @@ router = APIRouter(prefix="/stats", tags=["统计"])
     },
 )
 def category_stats(
-    # from 为 Python 关键字，对外参数名仍为 from。
-    date_from: datetime | None = Query(None, alias="from", description="起始时间（含）"),
-    date_to: datetime | None = Query(None, alias="to", description="结束时间（含）"),
+    params: Annotated[DateRangeQuery, Query()],
+    session: SessionDep,
 ) -> CategoryStatsResponse:
-    items, total_cents = store.category_summary(
-        date_from=date_from, date_to=date_to
+    """按类别汇总指定时间范围内的支出。
+
+    参数:
+        params: DateRangeQuery，包含可选的 from / to；两者都会转成 UTC，
+                且 from 不能晚于 to。
+        session: 请求级会话，交给 store.category_totals()。
+
+    返回:
+        CategoryStatsResponse：total_cents 是范围内总支出；
+        items 按类别总额降序，每项 ratio = 该类 total_cents / 总 total_cents，
+        保留 4 位小数。
+
+    调用关系:
+        store.category_totals() 执行
+        GROUP BY category + SUM(amount_cents) + COUNT(id)，
+        返回 CategoryTotal 列表和总金额；本函数只负责组装响应和计算 ratio。
+    """
+    items, total_cents = store.category_totals(
+        session,
+        date_from=params.date_from,
+        date_to=params.date_to,
     )
 
-    grouped: dict[str, list] = defaultdict(list)
-    for tx in items:
-        grouped[tx.category.value].append(tx)
-
-    stats: list[CategoryStat] = []
-    for category_value, txs in grouped.items():
-        subtotal = sum(t.amount_cents for t in txs)
-        stats.append(
-            CategoryStat(
-                category=txs[0].category,
-                total_cents=subtotal,
-                count=len(txs),
-                # total_cents 为 0 时避免除零。
-                ratio=round(subtotal / total_cents, 4) if total_cents else 0.0,
-            )
-        )
-
-    stats.sort(key=lambda s: s.total_cents, reverse=True)
-
     return CategoryStatsResponse(
-        date_from=date_from,
-        date_to=date_to,
+        date_from=params.date_from,
+        date_to=params.date_to,
         total_cents=total_cents,
-        items=stats,
+        items=[
+            CategoryStat(
+                category=item.category,
+                total_cents=item.total_cents,
+                count=item.count,
+                # total_cents 为 0 说明范围内没有账目，避免除零，ratio 统一为 0。
+                ratio=round(item.total_cents / total_cents, 4) if total_cents else 0.0,
+            )
+            for item in items
+        ],
     )

@@ -1,4 +1,5 @@
-# 后端镜像。开发期可以直接用，正式项目会和数据库、前端一起进 compose
+# 后端镜像。默认使用容器内 /app/data 下的 SQLite；
+# 接 MySQL 时通过 DATABASE_URL 环境变量注入连接串。
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

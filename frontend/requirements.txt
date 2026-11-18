@@ -1,0 +1,5 @@
+# 与后端 requirements.txt 分开锁定：Streamlit 只用于本地页面和演示，不进生产镜像。
+streamlit==1.67.0
+pandas==3.1.1
+altair==6.3.0
+requests==2.34.2

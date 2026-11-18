@@ -7,3 +7,7 @@ venv/
 .env.*
 tests/
 *.md
+# 本地数据库不入镜像，运行时由数据卷提供
+data/
+*.db
+*.sqlite3

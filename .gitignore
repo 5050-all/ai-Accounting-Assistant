@@ -25,8 +25,11 @@ data/
 *.sqlite
 *.log
 
-# ===== 参考样例 =====
-docker-demo/data/
+# ===== 本地 Docker 示例，不进入公开仓库 =====
+docker-demo/
+
+# ===== 本地工作文档与备份，不进入公开仓库 =====
+_内部文档/
 
 # ===== IDE / 系统 =====
 .vscode/

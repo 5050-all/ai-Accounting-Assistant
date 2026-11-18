@@ -1,15 +1,35 @@
-"""FastAPI 应用入口：创建应用、注册中间件与路由。
-
-启动：uvicorn app.main:app --reload --port 8000
-文档：http://127.0.0.1:8000/docs
+"""FastAPI 应用入口。
+启动顺序：
+1. 导入本模块时创建 app，注册 OpenAPI 元数据；
+2. FastAPI 启动 lifespan，调用 init_db() 创建缺失的表；
+3. 注册 CORS、统一异常处理器；
+4. 挂载 transactions / receipts / stats / budgets 四个路由；
+5. 直接定义 /health 和 /categories 两个基础接口。
 """
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import receipts, stats, transactions
+from app.api import budgets, receipts, stats, transactions
 from app.core.errors import register_error_handlers
+from app.db import init_db
+from app.schemas.meta import CategoryOption, HealthResponse
 from app.schemas.transaction import Category
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """应用启动时建表。
+
+    init_db() 来自 app.db，只执行 create_all 创建缺失表；
+    已有表结构不会被修改，字段变更需要单独迁移。
+    """
+    init_db()
+    yield
+
 
 app = FastAPI(
     title="记账助手 API",
@@ -19,38 +39,63 @@ app = FastAPI(
         "## 接口约定\n"
         "- 字段命名：snake_case\n"
         "- 金额：整数，单位「分」，字段名以 `_cents` 结尾\n"
-        "- 时间：ISO 8601 带时区，数据库存储 UTC\n"
+        "- 时间：入参为 ISO 8601 带时区，接口返回 UTC\n"
         "- 错误：`{\"code\": \"...\", \"message\": \"...\", \"detail\": {}}`\n"
     ),
+    # 绑定生命周期
+    lifespan=lifespan,
+    # 控制 /docs 和导入 Apifox 后的接口分组顺序。
+    openapi_tags=[
+        {"name": "记账", "description": "解析、保存与查询账目"},
+        {"name": "小票识别", "description": "上传小票或支付截图，生成待确认的草稿"},
+        {"name": "统计", "description": "按类别汇总支出"},
+        {"name": "预算", "description": "按月设置预算并判断是否接近或超出上限"},
+        {"name": "元数据", "description": "类别下拉框等基础数据"},
+        {"name": "运维", "description": "健康检查"},
+    ],
 )
 
-# 开发期允许本地前端跨域。
+# 浏览器跨域，先写着备用，streamlit不用这个
+# 前端不用看这个，除非要换React
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8501",
+        "http://127.0.0.1:8501",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# 统一异常处理后，挂载业务路由
 register_error_handlers(app)
-
 app.include_router(transactions.router)
 app.include_router(receipts.router)
 app.include_router(stats.router)
+app.include_router(budgets.router)
 
 
-@app.get("/health", tags=["运维"], summary="健康检查")
-def health() -> dict:
-    """返回服务状态与版本号，供容器探针与可用性检测使用。"""
-    return {"status": "ok", "version": app.version}
+#健康状态检查，后面docker正式部署后再改进，先设定返回版本号
+@app.get("/health", tags=["运维"], summary="健康检查", response_model=HealthResponse)
+def health() -> HealthResponse:
+    return HealthResponse(status="ok", version=app.version)
 
 
-@app.get("/categories", tags=["元数据"], summary="列出所有消费类别")
-def list_categories() -> list[dict]:
-    """返回全部消费类别，作为下拉框数据源。"""
-    return [{"value": c.value, "label": c.value} for c in Category]
+"""
+categories 统一的字典接口
+返回 Category 枚举的全部取值，供前端使用
+数据库和解析结果使用同一套 Category 枚举，避免前端硬编码
+"""
+@app.get(
+    "/categories",
+    tags=["元数据"],
+    summary="列出所有消费类别",
+    response_model=list[CategoryOption],
+)
+def list_categories() -> list[CategoryOption]:
+    return [CategoryOption(value=category, label=category.value) for category in Category]
