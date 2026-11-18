@@ -61,8 +61,7 @@ ai-Accounting-Assistant/
 ├── frontend/                       # 前端页面
 │   ├── app.py                      # 单文件页面：记账、查账、统计三个功能区（预算页待补充）
 │   ├── pyproject.toml              # 依赖声明（streamlit、pandas、altair、requests）
-│   ├── uv.lock                     # 依赖锁定
-│   └── README.md                   # 启动方式与接口对应关系
+│   └── uv.lock                     # 依赖锁定
 ├── docs/                           # 接口文档
 ├── pyproject.toml                  # 后端依赖声明
 └── uv.lock                         # 后端依赖锁定
@@ -84,8 +83,6 @@ cd frontend
 uv sync
 uv run streamlit run app.py
 ```
-
-前端详细说明见 `frontend/README.md`。
 
 ## 待开发领域
 
